@@ -6,7 +6,7 @@ import sqlite3
 import time
 
 # Reference database with JWST data product descriptions
-JW_PRODUCTS = "ds.db"
+JW_PRODUCTS = "jwstfiles.db"
 
 # Desired log file name
 LOG = "scan_jwst_directory.log"
@@ -463,7 +463,7 @@ def run(directory, output):
                         level=logging.DEBUG, filemode='w')
 
     #Search for files in the provided directory
-    files = find_files(filepath)
+    files = find_files(directory)
     fits = files['fits']
     asn = files['asn']
 
