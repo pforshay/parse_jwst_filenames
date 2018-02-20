@@ -1,3 +1,4 @@
+from astropy.io import fits
 import io
 import json
 import logging
@@ -24,7 +25,7 @@ ASN_COLUMNS = ['file',
 # Column names for data product DataFrames
 PRODUCT_COLUMNS = ['file',
                    'asn_number',
-                   'member_of'
+                   'member_of',
                    'program_id',
                    'instrument',
                    'detector',
@@ -58,7 +59,6 @@ class JWSTAssociation():
         :param filename:  The filename being read in.
         :type filename:  str
         """
-        print(fullpath)
         self.fullpath = fullpath
         self.filename = fullpath.split("/")[-1]
 
@@ -101,17 +101,6 @@ class JWSTAssociation():
         self.pipeline_element = in_chunks[2]
         self.number = in_chunks[3]
 
-        # Package all properties into a tuple for easy access.  Make sure
-        # ordering agrees with ASN_COLUMNS.
-        self.tuple_ = (self.filename,
-                       self.program_id,
-                       self.ac_id,
-                       self.pipeline_element,
-                       self.datetime,
-                       self.number
-                      )
-
-    #def get_data_members(self):
         with open(self.fullpath, 'r') as json_file:
             json_data = json.load(json_file)
             products_list = json_data["products"]
@@ -119,8 +108,20 @@ class JWSTAssociation():
             self.members = []
             for member in members_list:
                 self.members.append(member["expname"])
-                print("added {0}".format(member["expname"]))
             json_file.close()
+
+    def get_properties(self):
+        # Package all properties into a tuple for easy access.  Make sure
+        # ordering agrees with ASN_COLUMNS.
+        all_properties = [self.filename,
+                       self.program_id,
+                       self.ac_id,
+                       self.pipeline_element,
+                       self.datetime,
+                       self.number
+                      ]
+
+        return all_properties
 
 #--------------------
 
@@ -218,9 +219,11 @@ class JWSTProduct():
         self.description = None
         self.units = None
         self.level = None
+        self.pipeline = "Unknown"
         self.member_of = None
 
-        self.tuple_ = (self.filename,
+    def get_properties(self):
+        all_properties = [self.filename,
                        self.asn_number,
                        self.member_of,
                        self.program_id,
@@ -239,7 +242,9 @@ class JWSTProduct():
                        self.description,
                        self.units,
                        self.level
-                      )
+                      ]
+
+        return all_properties
 
     def __str__(self):
         return self.filename
@@ -282,6 +287,96 @@ def find_files(directory):
 
 #--------------------
 
+def create_association_objects(asn_list):
+    columns = ASN_COLUMNS
+    asn_objects = []
+    for a in sorted(asn_list):
+        asn = JWSTAssociation(a)
+        if asn.formatted:
+            asn_objects.append(asn)
+
+    return asn_objects
+
+#--------------------
+
+def create_product_objects(product_list):
+    columns = PRODUCT_COLUMNS
+    product_objects = []
+    for p in sorted(product_list):
+        product = JWSTProduct(p)
+        if product.formatted:
+            product_objects.append(product)
+
+    return product_objects
+
+#--------------------
+
+def add_asn_info_to_products(asn_objects, product_objects):
+    for product in product_objects:
+        for asn in asn_objects:
+            if product.filename in asn.members:
+                product.member_of = asn.filename
+                #product.pipeline = asn.pipeline_element
+                break
+    return product_objects
+
+#--------------------
+
+def add_suffix_info_to_products(product_objects, ref_db):
+    c = ref_db[0]
+    conn = ref_db[1]
+
+    for product in product_objects:
+        matches = {}
+        c.execute('SELECT * FROM detector1 WHERE suffix=?', [product.suffix])
+        matches['detector1'] = c.fetchone()
+        c.execute('SELECT * FROM image2 WHERE suffix=?', [product.suffix])
+        matches['image2'] = c.fetchone()
+        c.execute('SELECT * FROM spec2 WHERE suffix=?', [product.suffix])
+        matches['spec2'] = c.fetchone()
+        c.execute('SELECT * FROM image3 WHERE suffix=?', [product.suffix])
+        matches['image3'] = c.fetchone()
+        c.execute('SELECT * FROM spec3 WHERE suffix=?', [product.suffix])
+        matches['spec3'] = c.fetchone()
+        c.execute('SELECT * FROM tso3 WHERE suffix=?', [product.suffix])
+        matches['tso3'] = c.fetchone()
+        if product.instrument == 'ami':
+            c.execute('SELECT * FROM ami3 WHERE suffix=?', [product.suffix])
+            matches['ami3'] = c.fetchone()
+        elif product.instrument == 'miri' or product.instrument == 'nircam':
+            c.execute('SELECT * FROM coron3 WHERE suffix=?', [product.suffix])
+            matches['coron3'] = c.fetchone()
+
+        matches = {pipe: result for pipe, result
+                                in matches.items()
+                                if result is not None}
+        if len(matches) == 0:
+            logging.error("{0} is not a valid filetype.".format(
+                                                            product.filename))
+            product_objects.remove(product)
+            continue
+
+        pipeline = list(matches.keys())[-1]
+        suffix_info = matches[pipeline]
+        product.description = suffix_info[1]
+        product.units = suffix_info[2]
+        product.level = suffix_info[3]
+
+    return product_objects
+
+def add_objects_to_dataframe(obj_list, columns, mem_db):
+    new_conn = mem_db[1]
+    df = pd.DataFrame()
+
+    for obj in obj_list:
+        properties = obj.get_properties()
+        print("Properties = {0}".format(properties))
+        new_row = pd.DataFrame(columns=columns, data=[properties])
+        df = df.append(new_row, ignore_index=True)
+
+    return df
+#--------------------
+
 def connect_to_sqlite(db_file):
     """ Establish an sqlite3 database connection and cursor object.
 
@@ -293,145 +388,11 @@ def connect_to_sqlite(db_file):
     c = conn.cursor()
     return (c, conn)
 
-#--------------------
-
-def add_properties(jw_properties, db_result):
-    """ Add properties found in a reference database query to a list of JWST
-    data product file properties.
-
-    :param jw_properties:  A list of JWST data product file properties.
-    :type jw_properties:  list
-
-    :param db_result:  The result of the reference database query for the given
-                       data product type.  Holds [suffix, description, units].
-    :type db_result:  list
-
-    :param stage:  The stage of processing to add to the product file in
-                   question.
-    :type stage:  str
-    """
-
-    # Only need to add the description and units entries from db_result
-    jw_properties.extend(db_result[1:])
-
-    return jw_properties
-
-#--------------------
-
-def add_filenames_to_db(files, ref_db, mem_db):
-    """ Take a list of filenames and create a JWSTProduct object for each.
-    Add to this information by querying the reference database.  Create a
-    Pandas DataFrame to hold all the information and write that to the new
-    memory database in a table called 'products'.
-
-    :param files:  List of file names to add to the 'products' database table.
-    :type files:  list
-
-    :param ref_db:  Tuple containing sqlite3 cursor and connection items for
-                    the JWST data products reference database.
-    :type ref_db:  tuple
-
-    :param mem_db:  Tuple containing sqlite3 cursor and connection items for
-                    the new database in memory.
-    :type mem_db:  tuple
-    """
-
-    # Get column format from the global variable
-    columns = PRODUCT_COLUMNS
-
-    # Pull sqlite3 cursor and connection items out of tuples
-    c = ref_db[0]
-    new_conn = mem_db[1]
-
-    # Create empty Pandas DataFrame
-    df = pd.DataFrame()
-
-    for f in files:
-        jw = JWSTProduct(f)
-
-        # Skip file if .formatted not set
-        if not jw.formatted:
-            continue
-
-        # Get processed tuple of JWSTProduct properties
-        jw_list = list(jw.tuple_)
-
-        # Query each table looking for the suffix of the current file
-        suffix = []
-        suffix.extend(list(c.execute('SELECT * FROM detector1 WHERE suffix=?',
-                                     [jw.suffix])))
-        suffix.extend(list(c.execute('SELECT * FROM image2 WHERE suffix=?',
-                                     [jw.suffix])))
-        suffix.extend(list(c.execute('SELECT * FROM spec2 WHERE suffix=?',
-                                     [jw.suffix])))
-        suffix.extend(list(c.execute('SELECT * FROM image3 WHERE suffix=?',
-                                     [jw.suffix])))
-        suffix.extend(list(c.execute('SELECT * FROM spec3 WHERE suffix=?',
-                                     [jw.suffix])))
-        suffix.extend(list(c.execute('SELECT * FROM tso3 WHERE suffix=?',
-                                     [jw.suffix])))
-        if jw.instrument == 'ami':
-            query_a3 = c.execute('SELECT * FROM ami3 WHERE suffix=?',
-                                 [jw.suffix])
-            suffix.extend(list(query_a3))
-        elif jw.instrument == 'miri' or jw.instrument == 'nircam':
-            query_c3 = c.execute('SELECT * FROM coron3 WHERE suffix=?',
-                                 [jw.suffix])
-            suffix.extend(list(query_c3))
-
-        # Take last query result found, skip if none
-        if len(suffix) > 0:
-            suffix = suffix[-1]
-        else:
-            logging.error("{0} is not a valid file type.".format(jw.filename))
-            continue
-
-        # Add database query results to the JWSTProduct properties
-        jw_list = add_properties(jw_list, suffix)
-
-        # Make a new DataFrame with the new information and add it to the main
-        # frame
-        new_row = pd.DataFrame(columns=columns, data=[jw_list])
-        df = df.append(new_row, ignore_index=True)
-
-    # Write the DataFrame to the 'products' table
-    df.to_sql("products", new_conn, if_exists="replace", dtype='string')
-
-    return df
-
-#--------------------
-
-def add_associations_to_db(asn_list, mem_db):
-    """ Take a list of association .json files, create a JWSTAssociation
-    object to extract relevant properties from each, use these properties to
-    make a pandas DataFrame, and write that to sql.
-
-    :param asn_list:  List of association .json files.
-    :type asn_list:  list
-
-    :param mem_db:  Tuple containing memory database cursor and connections
-                    objects.
-    :type mem_db:  tuple
-    """
-
+def write_dataframe_to_sql(dataframe, table_name, mem_db):
     conn = mem_db[1]
-    columns = ASN_COLUMNS
+    dataframe.to_sql(table_name, conn, if_exists="replace", dtype='string')
 
-    df = pd.DataFrame()
-    asn_objects = []
-    for a in sorted(asn_list):
-        asn = JWSTAssociation(a)
-        if asn.formatted:
-            asn_fields = list(asn.tuple_)
-            asn_objects = []
-            #asn.get_data_members()
-            new_row = pd.DataFrame(columns=columns, data=[asn_fields])
-            df = df.append(new_row, ignore_index=True)
-        else:
-            continue
-
-    df.to_sql("associations", conn, if_exists="replace", dtype='string')
-    return asn_members
+#--------------------
 
 #--------------------
 
@@ -453,7 +414,7 @@ def get_exposure_programs_list(mem_db):
 
 #--------------------
 
-def pair_associations_and_exposures(programs, mem_db):
+def create_program_tables(programs, mem_db):
     """ Create new tables in the memory database on a program-by-program basis
     for both data products and association files.
 
@@ -568,19 +529,30 @@ def run(directory, output):
     fits = files['fits']
     asn = files['asn']
 
+    asn_objects = create_association_objects(asn)
+    fits_objects = create_product_objects(fits)
+
+    fits_objects = add_asn_info_to_products(asn_objects, fits_objects)
+
     # Connect to databases
     # ref_db = Reference database with JWST data product descriptions
     # mem_db = New database in memory to add results of scan into
     ref_db = connect_to_sqlite(JW_PRODUCTS)
     mem_db = connect_to_sqlite(":memory:")
 
-    #Add scan results to the databases
-    asn_dict = add_associations_to_db(asn, mem_db)
-    fits_frame = add_filenames_to_db(fits, ref_db, mem_db)
+    fits_objects = add_suffix_info_to_products(fits_objects, ref_db)
+
+    asn_frame = add_objects_to_dataframe(asn_objects, ASN_COLUMNS, mem_db)
+    fits_frame = add_objects_to_dataframe(fits_objects,
+                                          PRODUCT_COLUMNS,
+                                          mem_db)
+
+    write_dataframe_to_sql(asn_frame, "associations", mem_db)
+    write_dataframe_to_sql(fits_frame, "products", mem_db)
 
     #Create new database tables
     programs = get_exposure_programs_list(mem_db)
-    results = pair_associations_and_exposures(programs, mem_db)
+    results = create_program_tables(programs, mem_db)
 
     #Save the new database to disk
     write_db_to_disk(mem_db, output)
