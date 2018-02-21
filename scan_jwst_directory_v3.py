@@ -14,37 +14,6 @@ JW_PRODUCTS = "jwstproducts.db"
 # Desired log file name
 LOG = "scan_jwst_directory.log"
 
-# Column names for association DataFrames
-ASN_COLUMNS = ['file',
-                'program_id',
-                'ac_id',
-                'pipeline',
-                'datetime',
-                'number'
-               ]
-
-# Column names for data product DataFrames
-PRODUCT_COLUMNS = ['file',
-                   'asn_number',
-                   'member_of',
-                   'program_id',
-                   'instrument',
-                   'detector',
-                   'optical_elements',
-                   'target_id',
-                   'source_id',
-                   'obs_number',
-                   'visit_number',
-                   'visit_group',
-                   'parallel_seq',
-                   'activity_number',
-                   'exposure_number',
-                   'suffix',
-                   'description',
-                   'units',
-                   'level'
-                  ]
-
 #--------------------
 
 def find_files(directory):
@@ -103,23 +72,6 @@ def write_dataframe_to_sql(dataframe, table_name, mem_db):
 
 #--------------------
 
-#--------------------
-
-def get_exposure_programs_list(mem_db):
-    """ Return a list of the unique program ID's found in the products table
-    of the memory database.
-
-    :param mem_db:  Tuple containing memory database cursor and connections
-                    objects.
-    :type mem_db:  tuple
-    """
-
-    c = mem_db[0]
-    programs = []
-    for row in c.execute('SELECT program_id FROM products'):
-        programs.append(str(row[0]))
-    programs = list(set(programs))
-    return programs
 
 #--------------------
 
@@ -146,18 +98,20 @@ def create_program_tables(programs, mem_db):
         # Query the 'associations' and 'products' tables for entries with a
         # matching program ID.  Grab columns [1:] to omit the original index.
         association_query = c.execute('SELECT * FROM associations WHERE \
-                                      program_id=?', [p])
+                                      program=?', [p])
         association_query = c.fetchall()
         associations = [aq[1:] for aq in association_query]
+        asn_cols = [description[0] for description in c.description]
 
         exposure_query = c.execute('SELECT * FROM products WHERE \
-                                   program_id=?', [p])
+                                   program=?', [p])
         exposure_query = c.fetchall()
         products = [eq[1:] for eq in exposure_query]
+        product_cols = [description[0] for description in c.description]
 
         # Create a pandas DataFrame with the results of the 'products' query
         # and write it to a new table in the memory database.
-        products_frame = pd.DataFrame(products, columns=PRODUCT_COLUMNS)
+        products_frame = pd.DataFrame(products, columns=product_cols[1:])
         products_title = "{0}_products".format(p)
         products_frame.to_sql(products_title, conn, if_exists="replace",
                                dtype='string')
@@ -166,7 +120,7 @@ def create_program_tables(programs, mem_db):
         # conditionally create the results DataFrame and create a db table.
         if len(associations) > 0:
             associations_frame = pd.DataFrame(associations,
-                                              columns=ASN_COLUMNS)
+                                              columns=asn_cols[1:])
             associations_title = "{0}_associations".format(p)
             associations_frame.to_sql(associations_title, conn,
                                       if_exists="replace", dtype='string')
@@ -177,7 +131,6 @@ def create_program_tables(programs, mem_db):
         # Package to two results into a dictionary.
         results[p] = {'associations': associations_frame,
                       'products': products_frame}
-
     return results
 
 #--------------------
@@ -219,6 +172,7 @@ def create_asn_dict(asnlist):
     results = {}
     keywords = ["program",
                 "asn_id",
+                "asn_type",
                 "asn_pool",
                 "products"]
     print("Examining .json files...")
@@ -267,11 +221,12 @@ def create_asn_dict(asnlist):
 def create_fits_dict(fitslist):
     results = {}
     keywords = ["filename",
+                "program",
                 "date-obs",
                 "time-obs",
+                "targprop",
                 "obs_id",
                 "visit_id",
-                "program",
                 "observtn",
                 "visit",
                 "visitgrp",
@@ -280,10 +235,12 @@ def create_fits_dict(fitslist):
                 "exposure",
                 "instrume",
                 "detector",
+                "exp_type",
                 "filter",
                 "grating",
                 "fxd_slit",
                 "coronmsk",
+                "tsovisit"
                 ]
     print("Examining .fits headers...")
     for filepath in fitslist:
@@ -323,35 +280,91 @@ def add_suffix_info_to_dict(product_dict, ref_db):
         product = product_dict[k]
         filename = product['filename']
         instrument = product['instrume'].lower()
+        tso = product['tsovisit']
+        exp_type = product['exp_type'].split("_")[-1]
+        if exp_type == "":
+            logging.error("{0} is missing EXP_TYPE keyword.".format(filename))
+            continue
         spl = filename.split(".")[0]
         suffix = spl.split("_")[-1]
         matches = {}
+        searched = []
         c.execute('SELECT * FROM detector1 WHERE suffix=?', [suffix])
         matches['detector1'] = c.fetchone()
-        c.execute('SELECT * FROM image2 WHERE suffix=?', [suffix])
-        matches['image2'] = c.fetchone()
-        c.execute('SELECT * FROM spec2 WHERE suffix=?', [suffix])
-        matches['spec2'] = c.fetchone()
-        c.execute('SELECT * FROM image3 WHERE suffix=?', [suffix])
-        matches['image3'] = c.fetchone()
-        c.execute('SELECT * FROM spec3 WHERE suffix=?', [suffix])
-        matches['spec3'] = c.fetchone()
-        c.execute('SELECT * FROM tso3 WHERE suffix=?', [suffix])
-        matches['tso3'] = c.fetchone()
+        searched.append('detector1')
+        if (exp_type == "IMAGE" or
+                exp_type == "LYOT" or
+                exp_type == "MIR4QPM" or
+                exp_type == "CORONCAL" or
+                exp_type == "CORON" or
+                exp_type == "TSIMAGE" or
+                exp_type == "TACONFIRM" or
+                exp_type == "TACQ" or
+                exp_type == "IMAGING" or
+                exp_type == "CONFIRM"):
+            c.execute('SELECT * FROM image2 WHERE suffix=?', [suffix])
+            matches['image2'] = c.fetchone()
+            searched.append('image2')
+        if (exp_type == "LRS-FIXEDSLIT" or
+                exp_type == "LRS-SLITLESS" or
+                exp_type == "MRS" or
+                exp_type == "GRISM" or
+                exp_type == "TSGRISM" or
+                exp_type == "WFSS" or
+                exp_type == "SOSS" or
+                exp_type == "FIXEDSLIT" or
+                exp_type == "MSASPEC" or
+                exp_type == "BRIGHTOBJ" or
+                exp_type == "LAMP" or
+                exp_type == "IFU"):
+            c.execute('SELECT * FROM spec2 WHERE suffix=?', [suffix])
+            matches['spec2'] = c.fetchone()
+            searched.append('spec2')
+        if (exp_type == "IMAGE" or
+                exp_type == "TACONFIRM" or
+                exp_type == "TACQ" or
+                exp_type == "IMAGING" or
+                exp_type == "CONFIRM"):
+            c.execute('SELECT * FROM image3 WHERE suffix=?', [suffix])
+            matches['image3'] = c.fetchone()
+            searched.append('image3')
+        if (exp_type == "LRS-FIXEDSLIT" or
+                exp_type == "LRS-SLITLESS" or
+                exp_type == "MRS" or
+                exp_type == "GRISM" or
+                exp_type == "TSGRISM" or
+                exp_type == "WFSS" or
+                exp_type == "SOSS" or
+                exp_type == "FIXEDSLIT" or
+                exp_type == "MSASPEC" or
+                exp_type == "BRIGHTOBJ" or
+                exp_type == "LAMP" or
+                exp_type == "IFU"):
+            c.execute('SELECT * FROM spec3 WHERE suffix=?', [suffix])
+            matches['spec3'] = c.fetchone()
+            searched.append('spec3')
+        if tso:
+            c.execute('SELECT * FROM tso3 WHERE suffix=?', [suffix])
+            matches['tso3'] = c.fetchone()
+            searched.append('tso3')
         if instrument == 'niriss':
             c.execute('SELECT * FROM ami3 WHERE suffix=?', [suffix])
             matches['ami3'] = c.fetchone()
+            searched.append('ami3')
+        if (exp_type == "LYOT" or
+                exp_type == "MIR4QPM" or
+                exp_type == "CORONCAL" or
+                exp_type == "CORON"):
             c.execute('SELECT * FROM coron3 WHERE suffix=?', [suffix])
             matches['coron3'] = c.fetchone()
-        elif instrument == 'miri' or instrument == 'nircam':
-            c.execute('SELECT * FROM coron3 WHERE suffix=?', [suffix])
-            matches['coron3'] = c.fetchone()
+            searched.append('coron3')
 
         matches = {pipe: result for pipe, result
                                 in matches.items()
                                 if result is not None}
         if len(matches) == 0:
-            logging.error("{0} is not a valid filetype.".format(filename))
+            logging.error("{0} is not a valid filetype for {1}, checked {2}."
+                          .format(exp_type, filename, searched))
             del product_dict[k]
             continue
 
@@ -366,7 +379,7 @@ def add_suffix_info_to_dict(product_dict, ref_db):
 
 def turn_dict_into_frame(fitsdict):
     df = pd.DataFrame()
-    for entry in sorted(fitsdict.keys()):
+    for entry in list(fitsdict.keys()):
         properties = fitsdict[entry]
         cols = list(properties.keys())
         vals = list(properties.values())
@@ -412,6 +425,9 @@ def run(directory, output):
     df = turn_dict_into_frame(d)
     write_dataframe_to_sql(af, "associations", mem_db)
     write_dataframe_to_sql(df, "products", mem_db)
+    programs = list(set(df["program"]))
+    programs = list(filter(None, programs))
+    r = create_program_tables(programs, mem_db)
     write_db_to_disk(mem_db, output)
 
     #Close all database connections
@@ -419,6 +435,20 @@ def run(directory, output):
     ref_db[1].close()
     mem_db[0].close()
     mem_db[1].close()
+
+def look_at_header(directory):
+    import pprint
+    pp = pprint.PrettyPrinter(indent=4)
+    files = find_files(directory)
+    imgs = files['fits']
+    filepath = imgs[10]
+    print(filepath)
+    with fits.open(filepath) as fitsfile:
+        hdr = fitsfile[0].header
+        pp.pprint(hdr)
+        fitsfile.close()
+
+
 
 #--------------------
 
@@ -439,4 +469,5 @@ if __name__ == "__main__":
 
     d = "/grp/jwst/ssb/test_build7.1/examples_for_dms"
     out = "mydir_files.db"
+    #look_at_header(d)
     run(d, out)
