@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import pandas as pd
+import sqlalchemy
 import sqlite3
 import time
 
@@ -95,7 +96,10 @@ def connect_to_sqlite(db_file):
 
 def write_dataframe_to_sql(dataframe, table_name, mem_db):
     conn = mem_db[1]
-    dataframe.to_sql(table_name, conn, if_exists="replace", dtype='string')
+    cols = list(dataframe)
+    dataframe.to_sql(table_name,
+                     conn,
+                     if_exists="replace")
 
 #--------------------
 
@@ -240,12 +244,19 @@ def create_asn_dict(asnlist):
                     f[key] = json_data[key]
                 except KeyError:
                     f[key] = ""
+
             for p in f["products"]:
                 products.append(p["name"])
                 for m in p['members']:
                     members.append(m["expname"])
-            f["products"] = products
-            f["members"] = members
+            if len(products) == 0:
+                f["products"] = None
+            else:
+                f["products"] = str(products)
+            if len(members) == 0:
+                f["members"] = None
+            else:
+                f["members"] = str(members)
             json_file.close()
 
         results[filepath] = f
@@ -296,7 +307,9 @@ def add_asn_info_to_dict(product_dict, asn_dict):
         product["used_by"] = ""
         for a in sorted(asn_dict.keys()):
             asn = asn_dict[a]
-            if product["filename"] in asn["members"]:
+            if asn["members"] is None:
+                continue
+            elif product["filename"] in asn["members"]:
                 product["used_by"] = asn["filename"]
 
     return product_dict
@@ -397,10 +410,9 @@ def run(directory, output):
     d = add_suffix_info_to_dict(d, ref_db)
     af = turn_dict_into_frame(a)
     df = turn_dict_into_frame(d)
-    #write_dataframe_to_sql(af, "associations", mem_db)
+    write_dataframe_to_sql(af, "associations", mem_db)
     write_dataframe_to_sql(df, "products", mem_db)
     write_db_to_disk(mem_db, output)
-    #print(df)
 
     #Close all database connections
     ref_db[0].close()
